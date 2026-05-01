@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "pages:build": "next build && next-on-pages",
     "start": "next start"
   },
   "dependencies": {
@@ -12,6 +13,7 @@
     "react-dom": "19.0.0"
   },
   "devDependencies": {
+    "@cloudflare/next-on-pages": "^1.13.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
