@@ -123,8 +123,10 @@ async function fetchClubBy(
 async function resolveTenantByHost(host: string, env: Env): Promise<Tenant | null> {
   if (!host) return null;
 
-  const cacheKey = new Request(`https://tenant-resolver.local/resolve?host=${encodeURIComponent(host)}`);
-  const cache = caches.default;
+  const cacheKey = new Request(
+  `https://tenant-resolver.local/resolve?host=${encodeURIComponent(host)}`
+);
+const cache = caches.default;
 
   const cached = await cache.match(cacheKey);
   if (cached) {
