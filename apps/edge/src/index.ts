@@ -56,7 +56,7 @@ function buildSupabaseRestUrl(env: Env, path: string) {
 
 /**
  * Consulta o Supabase via REST (PostgREST).
- * Requer que a tabela/classe "clubs" esteja exposta no schema "public" (padrão do Supabase).
+ * Requer que a tabela "clubs" esteja exposta no schema "public" (padrão do Supabase).
  * Usamos "Accept: application/vnd.pgrst.object+json" para retornar um objeto único.
  */
 async function fetchClubBy(
@@ -66,7 +66,7 @@ async function fetchClubBy(
 ): Promise<Tenant | null> {
   const url = new URL(buildSupabaseRestUrl(env, "/rest/v1/clubs"));
 
-  // Seleção mínima de colunas (adicione mais campos se você quiser theme/manifest dinâmicos)
+  // Seleção mínima de colunas (adicione mais campos se quiser theme/manifest dinâmicos)
   url.searchParams.set("select", "id,slug,primary_domain");
   url.searchParams.set(field, `eq.${value}`);
   url.searchParams.set("limit", "1");
@@ -77,16 +77,11 @@ async function fetchClubBy(
       Authorization: `Bearer ${env.SUPABASE_ANON_KEY}`,
       Accept: "application/vnd.pgrst.object+json",
     },
-    // GET por padrão
   });
 
-  // 406 ou 404 podem aparecer dependendo de como o PostgREST responde quando não encontra
+  // 404 e 406: "não encontrou" (depende da config/Accept)
   if (resp.status === 404) return null;
-
-  if (resp.status === 406) {
-    // No rows (com Accept object) geralmente resulta em 406
-    return null;
-  }
+  if (resp.status === 406) return null;
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
@@ -101,7 +96,6 @@ async function fetchClubBy(
     primary_domain: string | null;
   };
 
-  // Normalização para o shape de tenant que o worker usa
   return {
     club_id: data.id,
     slug: data.slug,
@@ -117,16 +111,18 @@ async function fetchClubBy(
  * 3) senão → null
  *
  * Cache:
- * - cacheia por host por 60s (ajuste conforme necessidade)
- * - não cacheia erros (para não “envenenar”)
+ * - cacheia por host por 60s (quando encontra)
+ * - cacheia "não encontrado" por 30s
+ * - não cacheia erros
  */
 async function resolveTenantByHost(host: string, env: Env): Promise<Tenant | null> {
   if (!host) return null;
 
+  // Cache key precisa ser uma URL válida (não use  ...  no código real)
   const cacheKey = new Request(
-  `https://tenant-resolver.local/resolve?host=${encodeURIComponent(host)}`
-);
-const cache = caches.default;
+    `https://tenant-resolver.local/resolve?host=${encodeURIComponent(host)}`,
+  );
+  const cache = caches.default;
 
   const cached = await cache.match(cacheKey);
   if (cached) {
@@ -135,22 +131,13 @@ const cache = caches.default;
   }
 
   // 1) Domínio próprio
-  // (host já normalizado — sem www, sem porta)
-  try {
-    const byDomain = await fetchClubBy(env, "primary_domain", host);
-    if (byDomain) {
-      const res = Response.json(byDomain, {
-        headers: {
-          "cache-control": "public, max-age=60",
-        },
-      });
-      await cache.put(cacheKey, res.clone());
-      return byDomain;
-    }
-  } catch (err) {
-    // Se Supabase estiver off, não “derruba” tudo aqui — deixa o fetch lidar adiante se quiser.
-    // Mas aqui preferimos falhar de forma clara (já que tenant é essencial).
-    throw err;
+  const byDomain = await fetchClubBy(env, "primary_domain", host);
+  if (byDomain) {
+    const res = Response.json(byDomain, {
+      headers: { "cache-control": "public, max-age=60" },
+    });
+    await cache.put(cacheKey, res.clone());
+    return byDomain;
   }
 
   // 2) Fallback por slug em {slug}.borasport.app
@@ -159,20 +146,16 @@ const cache = caches.default;
     const bySlug = await fetchClubBy(env, "slug", slug);
     if (bySlug) {
       const res = Response.json(bySlug, {
-        headers: {
-          "cache-control": "public, max-age=60",
-        },
+        headers: { "cache-control": "public, max-age=60" },
       });
       await cache.put(cacheKey, res.clone());
       return bySlug;
     }
   }
 
-  // Cache de "não encontrado" (curto) para evitar martelar Supabase em host inválido
+  // Cache "não encontrado" curto para não martelar o Supabase em host inválido
   const res = Response.json(null, {
-    headers: {
-      "cache-control": "public, max-age=30",
-    },
+    headers: { "cache-control": "public, max-age=30" },
   });
   await cache.put(cacheKey, res.clone());
 
@@ -200,12 +183,10 @@ export default {
 
       // Assets por tenant (MVP)
       if (url.pathname === "/theme.css") {
-        // Aqui você pode evoluir depois para puxar cores/logo do Supabase
         const css = `:root{--club-slug:${tenant.slug};--primary:#0ea5e9;}`;
         return new Response(css, {
           headers: {
             "content-type": "text/css; charset=utf-8",
-            // Importante: varia por host
             "cache-control": "public, max-age=60",
           },
         });
@@ -224,7 +205,6 @@ export default {
         return Response.json(manifest, {
           headers: {
             "content-type": "application/manifest+json; charset=utf-8",
-            // Importante: varia por host
             "cache-control": "public, max-age=60",
           },
         });
@@ -234,11 +214,7 @@ export default {
       return Response.json({ ok: true, host, tenant });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      // Não expor envs/keys aqui
-      return Response.json(
-        { error: "EDGE_INTERNAL_ERROR", message },
-        { status: 500 },
-      );
+      return Response.json({ error: "EDGE_INTERNAL_ERROR", message }, { status: 500 });
     }
   },
 };
