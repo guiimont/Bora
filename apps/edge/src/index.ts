@@ -26,14 +26,9 @@ function extractSlugFromFallbackHost(host: string, suffix: string) {
   if (!host.endsWith(suffix)) return null;
 
   const slug = host.slice(0, -suffix.length);
-
-  // Evita casos tipo ".borasport.app" (slug vazio) e também host == suffix
   if (!slug) return null;
 
-  // Segurança mínima: impedir caracteres estranhos no slug
-  // (ajuste conforme seu padrão real de slug)
   if (!/^[a-z0-9-]+$/.test(slug)) return null;
-
   return slug;
 }
 
@@ -54,19 +49,12 @@ function buildSupabaseRestUrl(env: Env, path: string) {
   return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
 }
 
-/**
- * Consulta o Supabase via REST (PostgREST).
- * Requer que a tabela "clubs" esteja exposta no schema "public" (padrão do Supabase).
- * Usamos "Accept: application/vnd.pgrst.object+json" para retornar um objeto único.
- */
 async function fetchClubBy(
   env: Env,
   field: "primary_domain" | "slug",
   value: string,
 ): Promise<Tenant | null> {
   const url = new URL(buildSupabaseRestUrl(env, "/rest/v1/clubs"));
-
-  // Seleção mínima de colunas (adicione mais campos se quiser theme/manifest dinâmicos)
   url.searchParams.set("select", "id,slug,primary_domain");
   url.searchParams.set(field, `eq.${value}`);
   url.searchParams.set("limit", "1");
@@ -79,7 +67,6 @@ async function fetchClubBy(
     },
   });
 
-  // 404 e 406: "não encontrou" (depende da config/Accept)
   if (resp.status === 404) return null;
   if (resp.status === 406) return null;
 
@@ -104,61 +91,59 @@ async function fetchClubBy(
 }
 
 /**
- * Resolve tenant (club) baseado no host.
- * Regra:
- * 1) host existe em clubs.primary_domain → retorna aquele club
- * 2) senão, se host termina com FALLBACK_SUFFIX (ex: .borasport.app) → slug e query clubs.slug
- * 3) senão → null
+ * Valida o host recebido via querystring.
+ * Regras:
+ * - permitir hosts do wildcard *.borasport.app
+ * - permitir host "domínio próprio" (qualquer) porque será validado via Supabase (primary_domain)
  *
- * Cache:
- * - cacheia por host por 60s (quando encontra)
- * - cacheia "não encontrado" por 30s
- * - não cacheia erros
+ * Segurança: aqui só impede lixo óbvio (espaço, barra, etc).
  */
-async function resolveTenantByHost(host: string, env: Env): Promise<Tenant | null> {
-  if (!host) return null;
+function isHostParamSafe(host: string) {
+  if (!host) return false;
+  if (host.length > 253) return false;
+  if (host.includes("/") || host.includes("\\") || host.includes(" ")) return false;
+  return true;
+}
 
-  // Cache key precisa ser uma URL válida (não use  ...  no código real)
+/**
+ * Resolve tenant baseado no host "real do tenant".
+ * - Em produção (Pages + edge host fixo), você deve passar ?host=<tenant-host>
+ * - Em dev/local, pode cair no host do request mesmo
+ */
+async function resolveTenantByHost(tenantHost: string, env: Env): Promise<Tenant | null> {
+  if (!tenantHost) return null;
+
   const cacheKey = new Request(
-    `https://tenant-resolver.local/resolve?host=${encodeURIComponent(host)}`,
+    `https://tenant-resolver.local/resolve?host=${encodeURIComponent(tenantHost)}`,
   );
   const cache = caches.default;
 
   const cached = await cache.match(cacheKey);
   if (cached) {
-    const data = (await cached.json()) as Tenant | null;
-    return data;
+    return (await cached.json()) as Tenant | null;
   }
 
-  // 1) Domínio próprio
-  const byDomain = await fetchClubBy(env, "primary_domain", host);
+  // 1) domínio próprio
+  const byDomain = await fetchClubBy(env, "primary_domain", tenantHost);
   if (byDomain) {
-    const res = Response.json(byDomain, {
-      headers: { "cache-control": "public, max-age=60" },
-    });
+    const res = Response.json(byDomain, { headers: { "cache-control": "public, max-age=60" } });
     await cache.put(cacheKey, res.clone());
     return byDomain;
   }
 
-  // 2) Fallback por slug em {slug}.borasport.app
-  const slug = extractSlugFromFallbackHost(host, env.FALLBACK_SUFFIX);
+  // 2) fallback por slug (*.borasport.app)
+  const slug = extractSlugFromFallbackHost(tenantHost, env.FALLBACK_SUFFIX);
   if (slug) {
     const bySlug = await fetchClubBy(env, "slug", slug);
     if (bySlug) {
-      const res = Response.json(bySlug, {
-        headers: { "cache-control": "public, max-age=60" },
-      });
+      const res = Response.json(bySlug, { headers: { "cache-control": "public, max-age=60" } });
       await cache.put(cacheKey, res.clone());
       return bySlug;
     }
   }
 
-  // Cache "não encontrado" curto para não martelar o Supabase em host inválido
-  const res = Response.json(null, {
-    headers: { "cache-control": "public, max-age=30" },
-  });
+  const res = Response.json(null, { headers: { "cache-control": "public, max-age=30" } });
   await cache.put(cacheKey, res.clone());
-
   return null;
 }
 
@@ -168,20 +153,24 @@ export default {
       assertEnv(env);
 
       const url = new URL(request.url);
-      const host = normalizeHost(
+
+      // host do request (normalmente edge.borasport.app em produção)
+      const requestHost = normalizeHost(
         request.headers.get("x-forwarded-host") ?? request.headers.get("host"),
       );
 
-      // Rotas de infra básicas
+      // host real do tenant (vem do web via querystring em produção)
+      const hostParam = normalizeHost(url.searchParams.get("host"));
+      const tenantHost = hostParam && isHostParamSafe(hostParam) ? hostParam : requestHost;
+
       if (url.pathname === "/health") return new Response("ok");
 
-      const tenant = await resolveTenantByHost(host, env);
+      const tenant = await resolveTenantByHost(tenantHost, env);
 
       if (!tenant) {
-        return Response.json({ error: "CLUB_NOT_FOUND", host }, { status: 404 });
+        return Response.json({ error: "CLUB_NOT_FOUND", host: tenantHost }, { status: 404 });
       }
 
-      // Assets por tenant (MVP)
       if (url.pathname === "/theme.css") {
         const css = `:root{--club-slug:${tenant.slug};--primary:#0ea5e9;}`;
         return new Response(css, {
@@ -210,8 +199,7 @@ export default {
         });
       }
 
-      // Por enquanto: retorna tenant resolvido (pra você testar host routing)
-      return Response.json({ ok: true, host, tenant });
+      return Response.json({ ok: true, requestHost, tenantHost, tenant });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       return Response.json({ error: "EDGE_INTERNAL_ERROR", message }, { status: 500 });
