@@ -5,5 +5,5 @@ compatibility_date = "2026-04-28"
 [vars]
 BASE_DOMAIN = "borasport.app"
 FALLBACK_SUFFIX = ".borasport.app"
-SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
-SUPABASE_ANON_KEY = "YOUR_ANON_KEY"
+SUPABASE_URL = "https://yvuvsaobfrydsvceevcg.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl2dXZzYW9iZnJ5ZHN2Y2VldmNnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc2NDAxNDYsImV4cCI6MjA5MzIxNjE0Nn0.Y_Cj4KFai_0Y17X59dmkcFJ4JZvtsk2gyelHJt_WQRI"
