@@ -94,7 +94,10 @@ async function resolveTenant(host: string, env: Env): Promise<Tenant | null> {
   }
 
   const res = Response.json(tenant, {
-    headers: { "cache-control": tenant ? "max-age=60" : "max-age=30" },
+    headers: { "cache-control": tenant 
+      ? "public, max-age=60" 
+      : "public, max-age=30" 
+    },
   });
 
   await cache.put(cacheKey, res.clone());
@@ -167,23 +170,22 @@ export default {
 
     // ✅ PROXY FINAL (o que faltava)
     const origin = new URL(env.PAGES_ORIGIN);
-    const proxyUrl = new URL(request.url);
+const proxyUrl = new URL(request.url);
 
-    proxyUrl.protocol = origin.protocol;
-    proxyUrl.hostname = origin.hostname;
+proxyUrl.protocol = origin.protocol;
+proxyUrl.hostname = origin.hostname;
 
-    const proxied = await fetch(
-      new Request(proxyUrl.toString(), request),
-      { cf: { cacheTtl: 0 } } as any
-    );
+const newHeaders = new Headers(request.headers);
+newHeaders.set("host", origin.hostname);
 
-    const headers = new Headers(proxied.headers);
-    headers.set("Vary", "Host");
+const proxied = await fetch(
+  new Request(proxyUrl.toString(), {
+    method: request.method,
+    headers: newHeaders,
+    body: request.body,
+    redirect: "manual",
+  }),
+  { cf: { cacheTtl: 0 } } as any
+);
 
-    return new Response(proxied.body, {
-      status: proxied.status,
-      headers,
-    });
-  },
-};
 
