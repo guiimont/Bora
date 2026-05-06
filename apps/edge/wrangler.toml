@@ -9,5 +9,4 @@ FALLBACK_SUFFIX  = ".borasport.app"
 SUPABASE_URL     = "https://yvuvsaobfrydsvceevcg.supabase.co"
 PAGES_ORIGIN     = "https://borasport.pages.dev"
 
-# SUPABASE_ANON_KEY deve ser secret — rode uma vez:
-# wrangler secret put SUPABASE_ANON_KEY
+
