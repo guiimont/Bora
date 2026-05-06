@@ -3,18 +3,13 @@ type Env = {
   FALLBACK_SUFFIX: string;
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
-  PAGES_ORIGIN: string;
+  PAGES_ORIGIN?: string;
 };
 
 type Tenant = {
   club_id: string;
   slug: string;
-  name?: string;
   primary_domain?: string | null;
-  primary_color?: string | null;
-  secondary_color?: string | null;
-  logo_url?: string | null;
-  manifest_icon_url?: string | null;
 };
 
 function normalizeHost(raw: string | null) {
@@ -28,26 +23,37 @@ function normalizeHost(raw: string | null) {
 }
 
 function extractSlugFromFallbackHost(host: string, suffix: string) {
+  if (!host || !suffix) return null;
   if (!host.endsWith(suffix)) return null;
   const slug = host.slice(0, -suffix.length);
+  if (!slug) return null;
   if (!/^[a-z0-9-]+$/.test(slug)) return null;
   return slug;
 }
 
-function buildSupabaseUrl(env: Env, path: string) {
-  return `${env.SUPABASE_URL.replace(/\/$/, "")}${path}`;
+function assertEnv(env: Env) {
+  const missing: string[] = [];
+  if (!env.BASE_DOMAIN) missing.push("BASE_DOMAIN");
+  if (!env.FALLBACK_SUFFIX) missing.push("FALLBACK_SUFFIX");
+  if (!env.SUPABASE_URL) missing.push("SUPABASE_URL");
+  if (!env.SUPABASE_ANON_KEY) missing.push("SUPABASE_ANON_KEY");
+  if (missing.length > 0) {
+    throw new Error(`Missing env vars: ${missing.join(", ")}`);
+  }
+}
+
+function buildSupabaseRestUrl(env: Env, path: string) {
+  const base = env.SUPABASE_URL.replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
 }
 
 async function fetchClubBy(
   env: Env,
   field: "primary_domain" | "slug",
-  value: string
+  value: string,
 ): Promise<Tenant | null> {
-  const url = new URL(buildSupabaseUrl(env, "/rest/v1/clubs"));
-  url.searchParams.set(
-    "select",
-    "id,slug,name,primary_domain,primary_color,secondary_color,logo_url,manifest_icon_url"
-  );
+  const url = new URL(buildSupabaseRestUrl(env, "/rest/v1/clubs"));
+  url.searchParams.set("select", "id,slug,primary_domain");
   url.searchParams.set(field, `eq.${value}`);
   url.searchParams.set("limit", "1");
 
@@ -59,133 +65,216 @@ async function fetchClubBy(
     },
   });
 
-  if (!resp.ok) return null;
+  if (resp.status === 404) return null;
+  if (resp.status === 406) return null;
 
-  const data = await resp.json();
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(
+      `Supabase REST error (${resp.status}) fetching clubs by ${field}. Body: ${text.slice(0, 500)}`,
+    );
+  }
+
+  const data = (await resp.json()) as {
+    id: string;
+    slug: string;
+    primary_domain: string | null;
+  };
 
   return {
     club_id: data.id,
     slug: data.slug,
-    name: data.name,
     primary_domain: data.primary_domain,
-    primary_color: data.primary_color,
-    secondary_color: data.secondary_color,
-    logo_url: data.logo_url,
-    manifest_icon_url: data.manifest_icon_url,
   };
 }
 
-async function resolveTenant(host: string, env: Env): Promise<Tenant | null> {
-  if (!host) return null;
+/**
+ * Valida o host recebido via querystring.
+ * Regras:
+ * - permitir hosts do wildcard *.borasport.app
+ * - permitir host "domínio próprio" porque será validado via Supabase (primary_domain)
+ *
+ * Segurança: só bloqueia lixo óbvio.
+ */
+function isHostParamSafe(host: string) {
+  if (!host) return false;
+  if (host.length > 253) return false;
+  if (host.includes("/") || host.includes("\\") || host.includes(" ")) return false;
+  return true;
+}
 
-  const cacheKey = new Request(`https://cache/${host}`);
-  const cache = (caches as any).default;
+/**
+ * Resolve tenant baseado no host real do tenant.
+ * - Em produção (Pages + edge host fixo), passar ?host=<tenant-host>
+ * - Em dev/local, pode cair no host do request mesmo
+ */
+async function resolveTenantByHost(tenantHost: string, env: Env): Promise<Tenant | null> {
+  if (!tenantHost) return null;
 
+  const cacheKey = new Request(
+    `https://tenant-resolver.local/resolve?host=${encodeURIComponent(tenantHost)}`,
+  );
+
+  const cache = caches.default;
   const cached = await cache.match(cacheKey);
-  if (cached) return cached.json();
+  if (cached) {
+    return (await cached.json()) as Tenant | null;
+  }
 
-  let tenant = await fetchClubBy(env, "primary_domain", host);
+  const byDomain = await fetchClubBy(env, "primary_domain", tenantHost);
+  if (byDomain) {
+    const res = Response.json(byDomain, {
+      headers: { "cache-control": "public, max-age=60" },
+    });
+    await cache.put(cacheKey, res.clone());
+    return byDomain;
+  }
 
-  if (!tenant) {
-    const slug = extractSlugFromFallbackHost(host, env.FALLBACK_SUFFIX);
-    if (slug) {
-      tenant = await fetchClubBy(env, "slug", slug);
+  const slug = extractSlugFromFallbackHost(tenantHost, env.FALLBACK_SUFFIX);
+  if (slug) {
+    const bySlug = await fetchClubBy(env, "slug", slug);
+    if (bySlug) {
+      const res = Response.json(bySlug, {
+        headers: { "cache-control": "public, max-age=60" },
+      });
+      await cache.put(cacheKey, res.clone());
+      return bySlug;
     }
   }
 
-  const res = Response.json(tenant, {
-    headers: { "cache-control": tenant 
-      ? "public, max-age=60" 
-      : "public, max-age=30" 
-    },
+  const res = Response.json(null, {
+    headers: { "cache-control": "public, max-age=30" },
   });
-
   await cache.put(cacheKey, res.clone());
-
-  return tenant;
+  return null;
 }
 
-function css(tenant: Tenant) {
-  return `
-:root {
-  --primary: ${tenant.primary_color || "#0ea5e9"};
-  --secondary: ${tenant.secondary_color || "#0369a1"};
-}
-`;
+function buildThemeCss(tenant: Tenant) {
+  return `:root{--club-slug:${tenant.slug};--primary:#0ea5e9;}`;
 }
 
-function manifest(tenant: Tenant) {
+function buildManifest(tenant: Tenant) {
   return {
-    name: tenant.name || tenant.slug,
-    short_name: tenant.slug,
+    name: `Bora — ${tenant.slug}`,
+    short_name: "Bora",
     start_url: "/",
     display: "standalone",
-    theme_color: tenant.primary_color || "#0ea5e9",
-    icons: tenant.manifest_icon_url
-      ? [{ src: tenant.manifest_icon_url, sizes: "512x512", type: "image/png" }]
-      : [],
+    background_color: "#ffffff",
+    theme_color: "#0ea5e9",
   };
+}
+
+function withVaryHost(headers: Headers) {
+  const current = headers.get("Vary");
+  if (!current) {
+    headers.set("Vary", "Host");
+    return;
+  }
+
+  const values = current
+    .split(",")
+    .map((v) => v.trim().toLowerCase());
+
+  if (!values.includes("host")) {
+    headers.set("Vary", `${current}, Host`);
+  }
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+    try {
+      assertEnv(env);
 
-    const host = normalizeHost(
-      request.headers.get("x-forwarded-host") || request.headers.get("host")
-    );
+      const url = new URL(request.url);
 
-    if (url.pathname === "/health") {
-      return new Response("ok");
-    }
+      const requestHost = normalizeHost(
+        request.headers.get("x-forwarded-host") ?? request.headers.get("host"),
+      );
 
-    const tenant = await resolveTenant(host, env);
+      const hostParam = normalizeHost(url.searchParams.get("host"));
+      const tenantHost = hostParam && isHostParamSafe(hostParam) ? hostParam : requestHost;
 
-    if (!tenant) {
+      if (url.pathname === "/health") {
+        return new Response("ok", {
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "cache-control": "no-store",
+          },
+        });
+      }
+
+      const tenant = await resolveTenantByHost(tenantHost, env);
+
+      if (!tenant) {
+        return Response.json(
+          { error: "CLUB_NOT_FOUND", host: tenantHost },
+          {
+            status: 404,
+            headers: {
+              "cache-control": "public, max-age=30",
+              "content-type": "application/json; charset=utf-8",
+            },
+          },
+        );
+      }
+
+      if (url.pathname === "/theme.css") {
+        return new Response(buildThemeCss(tenant), {
+          headers: {
+            "content-type": "text/css; charset=utf-8",
+            "cache-control": "public, max-age=60",
+            "vary": "Host",
+          },
+        });
+      }
+
+      if (url.pathname === "/manifest.webmanifest") {
+        return new Response(JSON.stringify(buildManifest(tenant)), {
+          headers: {
+            "content-type": "application/manifest+json; charset=utf-8",
+            "cache-control": "public, max-age=60",
+            "vary": "Host",
+          },
+        });
+      }
+
+      const pagesOrigin = (env.PAGES_ORIGIN || "https://borasport.pages.dev").replace(/\/+$/, "");
+      const pagesUrl = new URL(pagesOrigin);
+      const proxyUrl = new URL(request.url);
+
+      proxyUrl.protocol = pagesUrl.protocol;
+      proxyUrl.hostname = pagesUrl.hostname;
+      proxyUrl.port = pagesUrl.port;
+
+      const proxyHeaders = new Headers(request.headers);
+      proxyHeaders.set("host", pagesUrl.hostname);
+      proxyHeaders.set("x-forwarded-host", tenantHost);
+      proxyHeaders.set("x-borasport-tenant-host", tenantHost);
+      proxyHeaders.set("x-borasport-tenant-slug", tenant.slug);
+
+      const proxiedRequest = new Request(proxyUrl.toString(), {
+        method: request.method,
+        headers: proxyHeaders,
+        body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+        redirect: "manual",
+      });
+
+      const response = await fetch(proxiedRequest);
+
+      const responseHeaders = new Headers(response.headers);
+      withVaryHost(responseHeaders);
+
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
       return Response.json(
-        { error: "CLUB_NOT_FOUND", host },
-        { status: 404 }
+        { error: "EDGE_INTERNAL_ERROR", message },
+        { status: 500 },
       );
     }
-
-    if (url.pathname === "/theme.css") {
-      return new Response(css(tenant), {
-        headers: {
-          "content-type": "text/css",
-          "cache-control": "max-age=60",
-          vary: "Host",
-        },
-      });
-    }
-
-    if (url.pathname === "/manifest.webmanifest") {
-      return new Response(JSON.stringify(manifest(tenant)), {
-        headers: {
-          "content-type": "application/json",
-          "cache-control": "max-age=60",
-          vary: "Host",
-        },
-      });
-    }
-
-    // ✅ PROXY FINAL (o que faltava)
-    const origin = new URL(env.PAGES_ORIGIN);
-const proxyUrl = new URL(request.url);
-
-proxyUrl.protocol = origin.protocol;
-proxyUrl.hostname = origin.hostname;
-
-const newHeaders = new Headers(request.headers);
-newHeaders.set("host", origin.hostname);
-
-const proxied = await fetch(
-  new Request(proxyUrl.toString(), {
-    method: request.method,
-    headers: newHeaders,
-    body: request.body,
-    redirect: "manual",
-  }),
-  { cf: { cacheTtl: 0 } } as any
-);
-
-
+  },
+};

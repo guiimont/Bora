@@ -1,12 +1,11 @@
-# apps/edge/wrangler.toml
 name = "borasport-edge"
 main = "src/index.ts"
 compatibility_date = "2026-04-28"
 
 [vars]
-BASE_DOMAIN      = "borasport.app"
-FALLBACK_SUFFIX  = ".borasport.app"
-SUPABASE_URL     = "https://yvuvsaobfrydsvceevcg.supabase.co"
-PAGES_ORIGIN     = "https://borasport.pages.dev"
+SUPABASE_URL = "https://yvuvsaobfrydsvceevcg.supabase.co"
+BASE_DOMAIN = "borasport.app"
+FALLBACK_SUFFIX = ".borasport.app"
+PAGES_ORIGIN = "https://borasport.pages.dev"
 
 
